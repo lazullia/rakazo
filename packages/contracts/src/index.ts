@@ -32,6 +32,7 @@ export * from "./nav-links.js";
 export * from "./network-host.js";
 export * from "./openai-compatible-ui.js";
 export * from "./payments.js";
+export * from "./pi-return.js";
 export * from "./reactions.js";
 export * from "./routine-watch.js";
 export * from "./rpc.js";

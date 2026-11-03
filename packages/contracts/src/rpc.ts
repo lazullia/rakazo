@@ -153,6 +153,7 @@ import {
 import { ModelHeadersSchema } from "./model-headers.js";
 import { ModelRoleSchema, ModelRoleUpdateSchema, ModelRoleViewSchema } from "./model-roles.js";
 import { PaymentWalletStatusSchema } from "./payments.js";
+import { PiReturnCandidateSchema } from "./pi-return.js";
 import { MessageReactionSchema } from "./reactions.js";
 import { RoutineWatchSchema } from "./routine-watch.js";
 import {
@@ -241,6 +242,69 @@ const threadSendWithRoutinesInput = threadSendFields.safeExtend({
 const spaceName = z.string().trim().min(1).max(60);
 
 export const appContract = {
+  /** Optional finite Pi work. The adapter validates the exact versioned draft;
+   * these are owner-session procedures, never model/MCP tools. */
+  piWork: {
+    preview: oc
+      .input(
+        z
+          .object({
+            originRunId: z.string().min(1).max(128),
+            reviewBotId: z.string().min(1).max(128),
+            input: z.string().min(1).max(16_000),
+          })
+          .strict(),
+      )
+      .output(
+        z.object({
+          draft: z.unknown(),
+          returnTarget: PiReturnCandidateSchema.optional(),
+          draftHash: z.string().regex(/^[a-f0-9]{64}$/),
+        }),
+      ),
+    approve: oc
+      .input(
+        z
+          .object({
+            draft: z.unknown(),
+            draftHash: z.string().regex(/^[a-f0-9]{64}$/),
+            approve: z.literal(true),
+            start: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .output(
+        z.object({
+          decisionId: z.string(),
+          workId: z.string(),
+          draftHash: z.string(),
+          queuedRunId: z.string().optional(),
+          runId: z.string().optional(),
+          runState: z.string().optional(),
+          startBlocked: z.boolean().optional(),
+        }),
+      ),
+    result: oc.input(z.object({ originRunId: z.string().min(1).max(128) }).strict()).output(
+      z.object({
+        workId: z.string(),
+        originRunId: z.string(),
+        threadId: z.string(),
+        accepted: z.literal(false),
+        original: z.object({
+          design: z.object({ stageId: z.string(), hash: z.string(), text: z.string().max(65_536) }),
+          review: z.object({
+            stageId: z.string(),
+            targetHash: z.string(),
+            hash: z.string(),
+            text: z.string().max(65_536),
+          }),
+        }),
+      }),
+    ),
+    revoke: oc
+      .input(z.object({ originRunId: z.string().min(1).max(128) }).strict())
+      .output(z.object({ ok: z.literal(true), stopConfirmed: z.literal(false) })),
+  },
   analytics: { screen: oc.input(AnalyticsScreenInput).output(z.object({ ok: z.literal(true) })) },
   aiConsent: {
     status: oc.input(AiConsentQuerySchema).output(AiConsentStatusSchema),

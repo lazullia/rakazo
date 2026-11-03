@@ -80,6 +80,7 @@ export interface AppEnv {
   screenProxySecret: string;
   sandboxProvider: string;
   cloudAgentProvider: string;
+  cloudAgentConfig?: string;
   cloudAgentSpaceId: string | undefined;
   cursorApiKey: string | undefined;
   /** Raw PAYMENT_WALLET_* values; createPaymentWalletProvider resolves them. */
@@ -262,6 +263,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     screenProxySecret: resolveScreenProxySecret(source),
     sandboxProvider,
     cloudAgentProvider,
+    cloudAgentConfig: optional(source.CLOUD_AGENT_CONFIG),
     cloudAgentSpaceId: optional(source.CLOUD_AGENT_SPACE_ID),
     cursorApiKey: optional(source.CURSOR_API_KEY),
     paymentWalletProvider: optional(source.PAYMENT_WALLET_PROVIDER),

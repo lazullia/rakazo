@@ -46,6 +46,8 @@ import { memoryRoutes } from "./routes/memory.js";
 import { messagingRoutes } from "./routes/messaging.js";
 import { modelsRoutes } from "./routes/models.js";
 import { paymentWalletRoutes } from "./routes/payment-wallet.js";
+import type { PiOwnerWorkConfig } from "./routes/pi-work.js";
+import { piWorkRoutes } from "./routes/pi-work.js";
 import { routinesRoutes } from "./routes/routines.js";
 import { spacesRoutes } from "./routes/spaces.js";
 import { threadsRoutes } from "./routes/threads.js";
@@ -60,6 +62,8 @@ export interface RouterDeps {
   pushTokens: PushTokenStore;
   analytics?: ProductAnalytics;
   cloudAgent?: CloudAgentConnection | null;
+  /** Explicit server composition only; absent keeps finite Pi work unavailable. */
+  piWork?: PiOwnerWorkConfig;
   /** The deployment's wallet provider; absent hides purchases. */
   paymentWallet?: PaymentWalletProvider | null;
   prisma: PrismaClient;
@@ -150,6 +154,7 @@ export function createRouter(deps: RouterDeps) {
     ...modelsRoutes(ctx),
     ...botsRoutes(ctx),
     ...threadsRoutes(ctx),
+    ...piWorkRoutes(ctx),
     ...computerRoutes(ctx),
     ...memoryRoutes(ctx),
     ...routinesRoutes(ctx),

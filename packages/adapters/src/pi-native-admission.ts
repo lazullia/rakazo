@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AdapterContext, CloudAgentLaunchRequest } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
-import type { PiStageRecord, PiStageStore } from "./pi-cloud-agent.js";
+import type { PiStage, PiStageRecord, PiStageStore } from "./pi-cloud-agent.js";
 
 /** Server-side receipt storage, never an MCP/tool argument or model assertion.
  * Implementations must bind Runs from authenticated launch/continuation/delivery
@@ -18,6 +18,8 @@ export interface PiApprovedStage {
   approvedBy: string;
   scope: "generalized-task-and-results";
   record: PiStageRecord;
+  /** Server-derived Run access; receipt of an original is not execution consent. */
+  runAccess?: "execute" | "read";
 }
 export interface PiStageRegistrar extends PiStageStore {
   bindTrustedStage(agentId: string, record: PiStageRecord): Promise<void>;
@@ -28,18 +30,21 @@ function refuse(): never {
 }
 
 /** Different operation keys/Runs share the same native and runner start slot. */
-export function piNativeStageId(record: PiStageRecord) {
+export function piNativeStageId(
+  record: Pick<PiStageRecord, "ownerId" | "spaceId" | "workId" | "stage">,
+) {
   return `pi-${createHash("sha256")
     .update(JSON.stringify([record.ownerId, record.spaceId, record.workId, record.stage]))
     .digest("hex")}`;
 }
-function identity(record: PiStageRecord) {
+export function piStageIdentity(record: PiStageRecord) {
   return JSON.stringify([
     record.ownerId,
     record.spaceId,
     record.workId,
     record.stage,
     record.runnerNamespace,
+    record.runtimeProtocol,
     record.handle,
     record.botId,
     record.threadId,
@@ -48,10 +53,16 @@ function identity(record: PiStageRecord) {
     record.input,
     record.targetHash,
     record.returnTo,
+    record.supervisor,
     record.startUntil,
     record.workUntil,
     record.stopReconcileUntil,
   ]);
+}
+
+/** Canonical metadata-only payload; callers submit these exact bytes through the gate. */
+export function piResultReferenceText(id: string, stage: PiStage, hash: string) {
+  return `Pi ${stage} original: ${id}; sha256 ${hash}. Use cloud_agent_result to read it. Acceptance has not been determined.`;
 }
 
 /** Internal admission after the ordinary cloud_agent_launch/message_bot gates.
@@ -64,11 +75,17 @@ export class PiNativeAdmission {
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** Synchronous final guard: call after the last authorization await. */
+  withinWorkDeadline(record: Pick<PiStageRecord, "workUntil">) {
+    return Number.isFinite(record.workUntil) && this.now() < record.workUntil;
+  }
+
   async forRun(context: AdapterContext & { botId: string }, run: { id: string; threadId: string }) {
     const receipt = await this.source.forRun(run.id).catch(refuse);
     if (!receipt) return undefined;
     const record = structuredClone(receipt.record);
     if (
+      (receipt.runAccess !== undefined && receipt.runAccess !== "execute") ||
       !receipt.decisionId ||
       receipt.decisionId !== record.approvalRef ||
       receipt.approvedBy !== context.userId ||
@@ -107,7 +124,7 @@ export class PiNativeAdmission {
           receipt.decisionId === saved.approvalRef &&
           receipt.approvedBy === saved.ownerId &&
           receipt.scope === "generalized-task-and-results" &&
-          identity(receipt.record) === identity(saved) &&
+          piStageIdentity(receipt.record) === piStageIdentity(saved) &&
           receipt.record.approvalValid &&
           receipt.record.sharingAllowed &&
           !receipt.record.cancelRequested &&
@@ -119,6 +136,35 @@ export class PiNativeAdmission {
     } catch {
       return false;
     }
+  }
+
+  async supervisorReturn(
+    context: AdapterContext & { botId: string },
+    run: { id: string; threadId: string },
+  ) {
+    const receipt = await this.source.forRun(run.id);
+    if (
+      receipt?.runAccess !== "read" ||
+      receipt.record.stage !== "review" ||
+      !receipt.record.supervisor ||
+      receipt.record.returnTo.botId !== context.botId ||
+      receipt.record.returnTo.threadId !== run.threadId
+    )
+      return undefined;
+    const id = piNativeStageId(receipt.record);
+    if (!(await this.authorizeResult(id, context, run))) refuse();
+    const record = await this.store.read(id);
+    if (
+      !record ||
+      piStageIdentity(record) !== piStageIdentity(receipt.record) ||
+      record.state !== "completed" ||
+      !record.stopConfirmed ||
+      !record.original ||
+      record.cancelRequested ||
+      record.reconciliationExpired
+    )
+      refuse();
+    return { id, record, returnTo: record.supervisor! };
   }
 
   /** Read-only authority: target stage and reader Run must still belong to the
@@ -133,7 +179,7 @@ export class PiNativeAdmission {
       const current = await this.source.forStage(piNativeStageId(reader));
       return Boolean(
         current &&
-          identity(current.record) === identity(reader) &&
+          piStageIdentity(current.record) === piStageIdentity(reader) &&
           current.decisionId === receipt.decisionId &&
           current.approvedBy === context.userId &&
           current.scope === "generalized-task-and-results" &&
@@ -176,7 +222,7 @@ export class PiNativeAdmission {
     const saved = await this.store.read(approval.id);
     if (saved) {
       if (
-        identity(saved) !== identity(approval.record) ||
+        piStageIdentity(saved) !== piStageIdentity(approval.record) ||
         !saved.approvalValid ||
         !saved.sharingAllowed ||
         saved.cancelRequested ||
@@ -204,9 +250,9 @@ export class PiNativeAdmission {
     if (
       !current ||
       current.id !== expected.id ||
-      identity(current.record) !== identity(expected.record) ||
+      piStageIdentity(current.record) !== piStageIdentity(expected.record) ||
       !saved ||
-      identity(saved) !== identity(expected.record) ||
+      piStageIdentity(saved) !== piStageIdentity(expected.record) ||
       !saved.approvalValid ||
       !saved.sharingAllowed ||
       saved.cancelRequested ||

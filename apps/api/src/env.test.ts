@@ -7,6 +7,23 @@ const base = {
 };
 
 describe("loadEnv", () => {
+  it("passes explicit generic Pi references to the shared boot validator", () => {
+    const config = JSON.stringify({
+      ownerId: "owner",
+      namespace: "pi-runtime/v1",
+      sourcePin: "a".repeat(64),
+      model: { provider: "provider-id", id: "model-id", connectionId: "connection-id" },
+    });
+    const env = loadEnv({
+      ...base,
+      CLOUD_AGENT_PROVIDER: "pi",
+      CLOUD_AGENT_SPACE_ID: "space",
+      CLOUD_AGENT_CONFIG: config,
+    });
+    expect(env.cloudAgentProvider).toBe("pi");
+    expect(env.cloudAgentSpaceId).toBe("space");
+    expect(env.cloudAgentConfig).toBe(config);
+  });
   it("defaults the attachment count to four and accepts configured bounds", () => {
     expect(loadEnv(base).maxAttachmentsPerMessage).toBe(4);
     expect(loadEnv({ ...base, MAX_ATTACHMENTS_PER_MESSAGE: " " }).maxAttachmentsPerMessage).toBe(4);

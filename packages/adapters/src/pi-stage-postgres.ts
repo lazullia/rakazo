@@ -28,6 +28,7 @@ function immutable(record: PiStageRecord) {
   return JSON.stringify({
     handle: record.handle,
     runnerNamespace: record.runnerNamespace,
+    runtimeProtocol: record.runtimeProtocol,
     workId: record.workId,
     stage: record.stage,
     ownerId: record.ownerId,
@@ -42,6 +43,7 @@ function immutable(record: PiStageRecord) {
     input: record.input,
     targetHash: record.targetHash,
     returnTo: record.returnTo,
+    supervisor: record.supervisor,
   });
 }
 
@@ -108,6 +110,15 @@ function validate(
   )
     fail();
   if (
+    record.runtimeClaim &&
+    (!record.runtimeClaim.owner ||
+      !record.dispatched ||
+      record.runtimeClaim.generation !== record.dispatchGeneration ||
+      !Number.isFinite(record.runtimeClaim.until) ||
+      record.runtimeClaim.until > record.workUntil)
+  )
+    fail();
+  if (
     record.original &&
     (typeof record.original.text !== "string" ||
       createHash("sha256").update(record.original.text).digest("hex") !== record.original.hash ||
@@ -127,6 +138,8 @@ const transitions: Record<PiStageRecord["state"], readonly PiStageRecord["state"
 function checkTransition(before: PiStageRecord, after: PiStageRecord) {
   if (
     immutable(before) !== immutable(after) ||
+    (before.runtimeClaim &&
+      JSON.stringify(before.runtimeClaim) !== JSON.stringify(after.runtimeClaim)) ||
     (before.dispatched && !after.dispatched) ||
     (before.stopConfirmed && !after.stopConfirmed) ||
     (before.cancelRequested && !after.cancelRequested) ||

@@ -32,6 +32,7 @@ import {
   createMessagingContextLoader,
   createModelCreditReconciler,
   createPaymentWalletProvider,
+  createPiRuntimeBootstrap,
   createPostgresReconciliationLeadership,
   createProductAnalytics,
   createReservedGraphileJobWorkerHost,
@@ -62,6 +63,7 @@ import {
   PostgresRealtimeFanout,
   PrismaPushTokenStore,
   pipedreamConfigFromEnv,
+  piRuntimeConfigFromEnv,
   RunJobPublisher,
   RunStarter,
   RunWorkerHost,
@@ -249,7 +251,18 @@ async function main() {
     ticketBoardEnabled,
   });
   // One provider instance so emulator launches and polls share the same Map.
-  const cloudAgent = createCloudAgentConnection();
+  let resolvePiModel: ReturnType<typeof createRunExecutor>["resolveConnectedModel"] | undefined;
+  const piRuntime = createPiRuntimeBootstrap({
+    config: piRuntimeConfigFromEnv(process.env),
+    prisma,
+    pool,
+    events,
+    resolveConnectedModel: async (...args) => {
+      if (!resolvePiModel) throw Error("Pi model resolver is not ready.");
+      return resolvePiModel(...args);
+    },
+  });
+  const cloudAgent = piRuntime?.cloudAgent ?? createCloudAgentConnection();
   const paymentWallet = await createPaymentWalletProvider();
   // Shared with the reconciler so a stuck wait uses the same push path as a finish notice.
   const pushTokens = new PrismaPushTokenStore(prisma, resolveEncryptionKey(process.env));
@@ -302,6 +315,7 @@ async function main() {
     messaging: messaging ? createMessagingContextLoader(prisma) : undefined,
     web: createWebProvider(),
     cloudAgent,
+    piAdmission: piRuntime?.piAdmission,
     // Device sockets live in an API process; the worker forwards to whichever one holds it.
     userDevices:
       process.env.USER_DEVICES_ENABLED === "false"
@@ -313,6 +327,8 @@ async function main() {
     paymentWallet,
     shutdownSignal: shutdown.signal,
   });
+
+  resolvePiModel = executor.resolveConnectedModel;
 
   const jobHost: JobWorkerHost =
     inMemoryJobs ??
@@ -340,6 +356,8 @@ async function main() {
     deploymentModelConfigured,
     messaging,
     cloudAgent,
+    piAdmission: piRuntime?.piAdmission,
+    piSupervisorReturn: piRuntime?.piSupervisorReturn,
     paymentWallet,
     notifications,
   });

@@ -3,6 +3,7 @@ import { messageBot } from "./bot-messages.js";
 import type { ExecutorDeps } from "./executor-deps.js";
 import type { PiCloudAgentProvider } from "./pi-cloud-agent.js";
 import { currentPiRun } from "./pi-cloud-agent-result.js";
+import { piResultReferenceText } from "./pi-native-admission.js";
 
 /** Called only from the ordinary gated message_bot handler. No result prose or
  * destination supplied by a model is used as execution/delivery evidence.
@@ -18,23 +19,36 @@ export async function returnFixedPiResult(
 ) {
   if (!deps.piAdmission) return undefined;
   try {
-    const approval = await deps.piAdmission.forRun(context, run);
+    const supervisor = await deps.piAdmission.supervisorReturn(context, run);
+    const approval = supervisor ?? (await deps.piAdmission.forRun(context, run));
     if (!approval) return undefined;
+    const target = supervisor?.returnTo ?? approval.record.returnTo;
     if (args.intent !== "result")
       return { error: "Use result intent for the approved Pi result return." };
-    if (args.bot_id && args.bot_id !== approval.record.returnTo.botId)
+    if (args.bot_id && args.bot_id !== target.botId)
       return { error: "Pi result destination differs from the approved recipient." };
     if (!(await currentPiRun(deps, context, run, "message_bot")))
       return { error: "Pi result return is not authorized for this run." };
-    const reference = await provider.returnReference(
-      approval.id,
-      context,
-      approval.record.returnTo,
-    );
-    await deps.piAdmission.recheck(context, run, approval);
+    const reference = supervisor
+      ? await provider.supervisorReference(
+          approval.id,
+          { ...context, threadId: run.threadId },
+          target,
+        )
+      : await provider.returnReference(approval.id, context, target);
+    if (supervisor) {
+      const current = await deps.piAdmission.supervisorReturn(context, run);
+      if (
+        !current ||
+        current.id !== supervisor.id ||
+        current.returnTo.botId !== target.botId ||
+        current.returnTo.threadId !== target.threadId
+      )
+        return { error: "Pi supervisor return authorization changed." };
+    } else await deps.piAdmission.recheck(context, run, approval);
     if (!(await currentPiRun(deps, context, run, "message_bot")))
       return { error: "Pi result return is not authorized for this run." };
-    const message = `Pi ${reference.stage} original: ${reference.id}; sha256 ${reference.originalHash}. Use cloud_agent_result to read it. Acceptance has not been determined.`;
+    const message = piResultReferenceText(reference.id, reference.stage, reference.originalHash);
     if (typeof args.message !== "string" || args.message.trim() !== message)
       return {
         error: "Pi result return message differs from the approved reference.",
@@ -63,9 +77,28 @@ export async function returnFixedPiResult(
         intent: "result",
         message: args.message,
         // Work/stage/result identity, independent of effect/Run/retry identity.
-        deliveryKey: `pi-result:${reference.id}:${reference.originalHash}`,
+        deliveryKey: `${supervisor ? "pi-supervisor" : "pi-result"}:${reference.id}:${reference.originalHash}`,
       },
-      { expectedThreadId: reference.returnTo.threadId, expectedName },
+      {
+        expectedThreadId: reference.returnTo.threadId,
+        expectedName,
+        ...(supervisor
+          ? {
+              authorizeDelivery: async (tx) => {
+                await tx.$queryRaw`SELECT id FROM external_effects WHERE id=${supervisor.record.approvalRef} FOR SHARE`;
+                const current = await deps.piAdmission!.supervisorReturn(context, run);
+                return Boolean(
+                  current &&
+                    current.id === supervisor.id &&
+                    current.returnTo.botId === target.botId &&
+                    current.returnTo.threadId === target.threadId &&
+                    (await currentPiRun(deps, context, run, "message_bot")) &&
+                    deps.piAdmission!.withinWorkDeadline(current.record),
+                );
+              },
+            }
+          : {}),
+      },
     );
     return sent.ok
       ? { ok: true, botId: sent.botId, name: sent.name, note: sent.note }

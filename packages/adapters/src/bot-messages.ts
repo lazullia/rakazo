@@ -9,7 +9,7 @@ import {
   nextBotMessageHop,
   resolveBotAddress,
 } from "@rakazo/core";
-import type { PrismaClient } from "@rakazo/db";
+import type { Prisma, PrismaClient } from "@rakazo/db";
 import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
@@ -86,6 +86,8 @@ export async function messageBot(
     forceUnread?: boolean;
     expectedThreadId?: string;
     expectedName?: string;
+    /** Trusted workflow reauthorization, never a tool argument. */
+    authorizeDelivery?: (tx: Prisma.TransactionClient) => Promise<boolean>;
   },
 ) {
   const message = String(input.message ?? "").trim();
@@ -233,6 +235,8 @@ export async function messageBot(
           if (!fixed) return { ok: false as const, error: "fixed delivery thread changed" };
         }
 
+        if (options?.authorizeDelivery && !(await options.authorizeDelivery(tx)))
+          throw new Error("Delivery authorization changed.");
         // Echo into the sender's chat in the same transaction so a failed notify
         // cannot leave one side delivered and the other blank.
         const outbound = await createThreadMessageInTransaction(tx, {
@@ -307,6 +311,8 @@ export async function messageBot(
           lease: runLeaseFor(deps, run.id),
           payload: { messageId: outbound.id, role: "bot", blocks: [outboundBlock] },
         });
+        if (options?.authorizeDelivery && !(await options.authorizeDelivery(tx)))
+          throw new Error("Delivery authorization changed.");
         return {
           ok: true as const,
           runId: nextRun.id,

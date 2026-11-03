@@ -43,6 +43,9 @@ import { McpOAuthCallbackPage } from "./pages/McpOAuthCallback";
 import { ShellPage } from "./pages/Shell";
 import { SlackInstallCallbackPage } from "./pages/SlackInstallCallback";
 
+const PiWorkPage = lazyComponent(() =>
+  import("./pages/PiWork").then((module) => module.PiWorkPage),
+);
 const AuthPage = lazyComponent(() => import("./pages/Auth").then((module) => module.AuthPage));
 const PasswordResetPage = lazyComponent(() =>
   import("./pages/Auth").then((module) => module.PasswordResetPage),
@@ -274,6 +277,7 @@ function SessionApp() {
               >
                 <Route path="/onboarding/:step?" element={<OnboardingPage />} />
                 <Route path="/app" element={<ShellPage />} />
+                <Route path="/app/pi-work" element={<PiWorkPage />} />
                 <Route path="/app/g/:groupId" element={<ShellPage />} />
                 <Route path="/app/artifacts" element={<ArtifactsPage />} />
                 <Route path="/app/artifacts/:artifactId" element={<ArtifactsPage />} />

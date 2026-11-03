@@ -3325,7 +3325,8 @@ describe("finite-work admission never replaces the existing native launch gate",
       const prepare = vi.fn(async () => {
         throw new Error("No finite owner receipt");
       });
-      const admission = { prepare } as unknown as PiNativeAdmission;
+      const forRun = vi.fn(async () => undefined);
+      const admission = { prepare, forRun } as unknown as PiNativeAdmission;
       const f = await originalReaderFixture(
         [{ effect, matchKind: "tool", matchValue: "cloud_agent_launch" }],
         admission,
@@ -3348,8 +3349,16 @@ describe("finite-work admission never replaces the existing native launch gate",
         // The normal rule permits reaching admission without a new card. It does
         // not substitute for the missing finite owner receipt or launch a Pi.
         expect(f.pauseRunForInput).not.toHaveBeenCalled();
-        expect(prepare).toHaveBeenCalledOnce();
-        expect(f.results.at(-1)).toHaveProperty("error", "Pi work is not authorized for this run.");
+        expect(forRun).toHaveBeenCalledOnce();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(f.results.at(-1)).toHaveProperty(
+          "error",
+          "Owner approval is required for this Pi work.",
+        );
+        expect(f.results.at(-1)).toHaveProperty(
+          "approvalUrl",
+          "/app/pi-work?botId=bot-1&originRunId=run-1",
+        );
       }
     },
   );

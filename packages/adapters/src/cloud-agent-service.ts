@@ -20,6 +20,13 @@ export interface CloudAgentDeps {
   cloudAgent: CloudAgentConnection | null | undefined;
   runLease?: ExecutorDeps["runLease"];
   piAdmission?: PiNativeAdmission;
+  /** Optional server publication to the authenticated original human thread. */
+  piSupervisorReturn?: {
+    publish(
+      id: string,
+      generation: number,
+    ): Promise<{ status: "sent" | "unavailable" | "unknown"; messageId?: string }>;
+  };
 }
 
 export function cloudAgentBlock(agent: CloudAgent) {
@@ -53,6 +60,11 @@ export async function executeCloudAgentTool(
       try {
         if (!deps.piAdmission || !(await currentPiRun(deps, context, run, name)))
           return { error: "Pi work is not authorized for this run." };
+        if (!(await deps.piAdmission.forRun(context, run)))
+          return {
+            error: "Owner approval is required for this Pi work.",
+            approvalUrl: `/app/pi-work?botId=${encodeURIComponent(context.botId)}&originRunId=${encodeURIComponent(run.id)}`,
+          };
         admission = await deps.piAdmission.prepare(context, run, request);
         await pi.checkNativeThread(admission.id, context, run.threadId);
       } catch {

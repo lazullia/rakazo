@@ -8,6 +8,7 @@ import type {
   CloudAgentSnapshot,
 } from "@rakazo/adapter-kit";
 import { CloudAgentRequestRejected } from "@rakazo/adapter-kit";
+import { piNativeStageId, piResultReferenceText } from "./pi-native-admission.js";
 
 export type PiStage = "design" | "review";
 export type PiObservation =
@@ -38,9 +39,13 @@ export interface PiStageRecord {
   dispatchGeneration: number;
   dispatchClaim?: { owner: string; generation: number; until: number };
   reconciliationExpired?: boolean;
+  /** Durable runtime acceptance; never expires into permission to start again. */
+  runtimeProtocol?: "pi-runtime/v1";
+  runtimeClaim?: { owner: string; generation: number; until: number };
   input: string;
   targetHash?: string;
   returnTo: { botId: string; threadId: string };
+  supervisor?: { botId: string; threadId: string; requestMessageId: string };
   dispatched: boolean;
   cancelRequested: boolean;
   state: "reserved" | "running" | "completed" | "unknown" | "cancelled";
@@ -154,6 +159,12 @@ export class PiCloudAgentProvider implements CloudAgentProvider {
     if (!record) throw new CloudAgentRequestRejected("invalid");
     this.check(record, context);
     return record;
+  }
+
+  /** Server-only scheduling hint. Current approval is still checked separately. */
+  async remainingWorkTime(id: string, context: AdapterContext) {
+    const record = await this.record(id, context);
+    return Math.max(0, record.workUntil - this.now());
   }
 
   async checkNativeThread(id: string, context: AdapterContext, threadId: string) {
@@ -390,6 +401,23 @@ export class PiCloudAgentProvider implements CloudAgentProvider {
       stopConfirmed: record.stopConfirmed,
       reconciliationExpired: record.reconciliationExpired ?? false,
       original: record.original,
+      supervisor: record.supervisor,
+      ...(record.stage === "review" && record.supervisor && record.original
+        ? {
+            supervisorReturn: {
+              botId: record.supervisor.botId,
+              threadId: record.supervisor.threadId,
+              message: piResultReferenceText(
+                piNativeStageId(record),
+                "review",
+                record.original.hash,
+              ),
+            },
+          }
+        : {}),
+      ...(record.stage === "review"
+        ? { designId: piNativeStageId({ ...record, stage: "design" }) }
+        : {}),
       accepted: false as const,
     });
   }
@@ -432,9 +460,12 @@ export class PiCloudAgentProvider implements CloudAgentProvider {
       const executor = record.botId === context.botId && record.threadId === context.threadId;
       const recipient =
         record.returnTo.botId === context.botId && record.returnTo.threadId === context.threadId;
+      const supervisor =
+        record.supervisor?.botId === context.botId &&
+        record.supervisor?.threadId === context.threadId;
       const original = record.original;
       if (
-        (!executor && !recipient) ||
+        (!executor && !recipient && !supervisor) ||
         !record.approvalValid ||
         !record.sharingAllowed ||
         record.cancelRequested ||
@@ -447,7 +478,19 @@ export class PiCloudAgentProvider implements CloudAgentProvider {
       ) {
         throw new CloudAgentRequestRejected("invalid");
       }
-      return this.result(record);
+      const result = this.result(record);
+      return {
+        ...result,
+        ...(executor && original
+          ? {
+              approvedReturn: {
+                botId: record.returnTo.botId,
+                threadId: record.returnTo.threadId,
+                message: piResultReferenceText(id, record.stage, original.hash),
+              },
+            }
+          : {}),
+      };
     });
   }
 
@@ -471,6 +514,44 @@ export class PiCloudAgentProvider implements CloudAgentProvider {
       targetHash: result.original.targetHash,
       returnTo,
     };
+  }
+
+  /** Narrow final design-reader -> approved original supervisor reference. */
+  async supervisorReference(
+    id: string,
+    context: PiHandoffContext,
+    target: { botId: string; threadId: string },
+  ) {
+    return this.store.change(id, (record, design) => {
+      this.checkOwner(record, context);
+      if (
+        record.stage !== "review" ||
+        record.returnTo.botId !== context.botId ||
+        record.returnTo.threadId !== context.threadId ||
+        record.supervisor?.botId !== target.botId ||
+        record.supervisor.threadId !== target.threadId ||
+        record.state !== "completed" ||
+        !record.stopConfirmed ||
+        !record.original ||
+        record.original.targetHash !== record.targetHash ||
+        !record.approvalValid ||
+        !record.sharingAllowed ||
+        record.cancelRequested ||
+        record.reconciliationExpired ||
+        this.now() >= record.workUntil ||
+        !this.designEligible(record, design) ||
+        createHash("sha256").update(record.original.text).digest("hex") !== record.original.hash
+      )
+        throw new CloudAgentRequestRejected("invalid");
+      return {
+        id,
+        workId: record.workId,
+        stage: record.stage,
+        originalHash: record.original.hash,
+        targetHash: record.targetHash,
+        returnTo: structuredClone(target),
+      };
+    });
   }
 
   async returnRoute(

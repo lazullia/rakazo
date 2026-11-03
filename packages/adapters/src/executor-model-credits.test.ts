@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRunExecutor } from "./executor.js";
+import { binding } from "./pi-cloud-agent.test-fixtures.js";
 import { listPiCatalog } from "./pi-models.js";
+import { resolvePiRuntimeModel } from "./pi-runtime-bootstrap.js";
 
 describe("funding selects credentials without deleting saved connections", () => {
   describe.each([false, true])("with stored-secret requirement=%s", (requireStoredSecret) => {
@@ -118,6 +120,23 @@ describe("funding selects credentials without deleting saved connections", () =>
           expect(resolved.apiKey).toBe(hosted ? "fixture-deployment-key" : "fixture-personal-key");
           expect(Boolean(resolved.callObserver)).toBe(hosted);
           expect(load.mock.calls.length).toBe(hosted ? 0 : 1);
+          const native = await resolvePiRuntimeModel(
+            {
+              ownerId: "user",
+              spaceId: "space",
+              namespace: "fixture-runtime",
+              sourcePin: "a".repeat(64),
+              model: { provider, id: model.id },
+            },
+            binding({
+              ownerId: "user",
+              runtimeProtocol: "pi-runtime/v1",
+              runnerNamespace: "fixture-runtime",
+            }),
+            executor.resolveConnectedModel,
+          );
+          expect(native.apiKey).toBe(resolved.apiKey);
+          expect(Boolean(native.callObserver)).toBe(hosted);
         } finally {
           vi.unstubAllEnvs();
         }

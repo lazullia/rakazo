@@ -98,6 +98,9 @@ export async function pollCloudAgent(
             launchRequest: {},
           },
           abandoned,
+          snapshot.status === "finished" && deps.piSupervisorReturn
+            ? await provider.remainingWorkTime(agent.id, context)
+            : undefined,
         );
       } catch (error) {
         if (!(error instanceof CloudAgentRequestRejected)) throw error;
@@ -317,6 +320,7 @@ async function finishPoll(
   agent: CloudAgent,
   data: Prisma.CloudAgentUpdateManyMutationInput,
   abandoned = false,
+  returnWindowMs?: number,
 ) {
   const committed = await deps.prisma.$transaction(async (tx) => {
     // Same lock order as clearing chat: thread first, then message/run changes.
@@ -351,7 +355,16 @@ async function finishPoll(
     const terminal = status !== "running";
     const cancelRequested =
       !terminal && (detached || data.cancelRequested === true || agent.cancelRequested);
-    const nextPollAt = terminal ? null : new Date(Date.now() + 5_000);
+    // Keep terminal completion recoverable until the original-thread write is
+    // confirmed. Reuse the existing bounded poll/reconciler, never relaunch Pi.
+    const returnPending =
+      status === "finished" &&
+      !detached &&
+      deps.cloudAgent?.provider instanceof PiCloudAgentProvider &&
+      deps.piSupervisorReturn &&
+      returnWindowMs !== undefined &&
+      returnWindowMs > 0;
+    const nextPollAt = terminal && !returnPending ? null : new Date(Date.now() + 5_000);
     const updated = await tx.cloudAgent.updateMany({
       where: fence(agent),
       data: {
@@ -420,7 +433,12 @@ async function finishPoll(
         wakeRunId = run.id;
       }
     }
-    return { seq, wakeRunId, nextPollAt };
+    return {
+      seq,
+      wakeRunId,
+      nextPollAt,
+      completedGeneration: !detached && status === "finished" ? saved.generation : undefined,
+    };
   });
   if (!committed) return;
   if (committed.seq !== undefined)
@@ -431,5 +449,36 @@ async function finishPoll(
       getLogger().warn("cloud agent wake deferred to reconciliation");
     });
   }
-  if (committed.nextPollAt) await enqueueCloudAgent(deps, agent.id, committed.nextPollAt);
+  let nextPollAt = committed.nextPollAt;
+  if (committed.completedGeneration !== undefined && deps.piSupervisorReturn) {
+    const returned = await deps.piSupervisorReturn
+      .publish(agent.id, committed.completedGeneration)
+      .catch(() => ({ status: "unknown" as const }));
+    if (returned.status !== "unknown") {
+      await deps.prisma.cloudAgent.updateMany({
+        where: {
+          id: agent.id,
+          version: agent.version + 1,
+          generation: committed.completedGeneration,
+          status: "finished",
+        },
+        data: { nextPollAt: null },
+      });
+      nextPollAt = null;
+    } else {
+      // A missed commit response is reconciled using the same DB message nonce.
+      // Its transaction locks the original thread and reads before writing.
+      await deps.prisma.cloudAgent.updateMany({
+        where: {
+          id: agent.id,
+          version: agent.version + 1,
+          generation: committed.completedGeneration,
+          status: "finished",
+        },
+        data: { errorCount: agent.errorCount + 1 },
+      });
+      getLogger().warn("Pi original result return not confirmed");
+    }
+  }
+  if (nextPollAt) await enqueueCloudAgent(deps, agent.id, nextPollAt);
 }

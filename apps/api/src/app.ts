@@ -51,6 +51,7 @@ import {
   createMessagingTeamChatSender,
   createModelCreditReconciler,
   createPaymentWalletProvider,
+  createPiRuntimeBootstrap,
   createProductAnalytics,
   createRunExecutor,
   createRunSandbox,
@@ -79,6 +80,7 @@ import {
   PostgresRealtimeFanout,
   PrismaPushTokenStore,
   pipedreamConfigFromEnv,
+  piRuntimeConfigFromEnv,
   piSessionsRoot,
   RunJobPublisher,
   RunStarter,
@@ -253,6 +255,8 @@ type CreateAppOverrides = Partial<AppEnv> & {
   logger?: Logger;
   runtime?: AgentRuntime;
   contextStrategy?: AgentContextStrategy;
+  /** Isolated tests may provide a stage store with their database override. */
+  piStageStore?: Parameters<typeof createPiRuntimeBootstrap>[0]["stageStore"];
   /** Test-only stand-in for desktops connected to this server. */
   userDevices?: UserDeviceGateway;
 };
@@ -276,6 +280,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     logger: loggerOverride,
     runtime: runtimeOverride,
     contextStrategy,
+    piStageStore,
     userDevices: userDevicesOverride,
     ...envOverrides
   } = overrides;
@@ -594,12 +599,30 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     .catch((error) => {
       if (!shutdown.signal.aborted) getLogger().error("mcp server arguments move failed", error);
     });
-  // One provider instance so emulator launches and polls share the same Map.
-  const cloudAgent = createCloudAgentConnection({
-    CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
-    CURSOR_API_KEY: env.cursorApiKey,
-    CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
+  let resolvePiModel: ReturnType<typeof createRunExecutor>["resolveConnectedModel"] | undefined;
+  const piRuntime = createPiRuntimeBootstrap({
+    config: piRuntimeConfigFromEnv({
+      CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
+      CLOUD_AGENT_CONFIG: env.cloudAgentConfig,
+      CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
+    }),
+    prisma,
+    pool: created.pool,
+    stageStore: piStageStore,
+    events,
+    resolveConnectedModel: async (...args) => {
+      if (!resolvePiModel) throw Error("Pi model resolver is not ready.");
+      return resolvePiModel(...args);
+    },
   });
+  // Both API-side jobs and a dedicated worker use the same explicit config.
+  const cloudAgent =
+    piRuntime?.cloudAgent ??
+    createCloudAgentConnection({
+      CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
+      CURSOR_API_KEY: env.cursorApiKey,
+      CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
+    });
   const paymentWallet = await createPaymentWalletProvider({
     PAYMENT_WALLET_PROVIDER: env.paymentWalletProvider,
     PAYMENT_WALLET_CLIENT_ID: env.paymentWalletClientId,
@@ -662,10 +685,13 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     messaging: messaging ? createMessagingContextLoader(prisma) : undefined,
     web: createWebProvider(),
     cloudAgent,
+    piAdmission: piRuntime?.piAdmission,
     userDevices: userDevicesOverride ?? userDevices,
     paymentWallet,
     shutdownSignal: shutdown.signal,
   });
+
+  resolvePiModel = executor.resolveConnectedModel;
 
   const jobHandlers = createBackgroundJobHandlers({
     executor,
@@ -685,6 +711,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     deploymentModelConfigured: env.deploymentModelConfigured,
     messaging,
     cloudAgent,
+    piAdmission: piRuntime?.piAdmission,
+    piSupervisorReturn: piRuntime?.piSupervisorReturn,
     paymentWallet,
   });
   if (inMemoryJobs) {
@@ -744,6 +772,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     pluginRepoFetcher,
     pluginMarketplaceRead,
     cloudAgent,
+    piWork: piRuntime?.piWork,
     paymentWallet,
     codexCatalog,
     prisma,
