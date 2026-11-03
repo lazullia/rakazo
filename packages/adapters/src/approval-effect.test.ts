@@ -571,3 +571,41 @@ describe("catalog wrapper names", () => {
     ).toBe(true);
   });
 });
+
+describe("original-result effect cache safety", () => {
+  const cached = { original: { text: "Generalized cached original" } };
+  it.each(["completed", "uncertain"])("never returns original bytes stored under %s", (status) => {
+    const decision = resolveDuplicateEffectGate({ status, result: cached }, "cloud_agent_result");
+    expect(decision).toMatchObject({ action: "return", result: { error: expect.any(String) } });
+    expect(decision).not.toHaveProperty("result.original");
+  });
+  it.each(["completed", "uncertain"])("preserves other tools' %s replay", (status) => {
+    expect(resolveDuplicateEffectGate({ status, result: cached }, "destination.write")).toEqual({
+      action: "return",
+      result: cached,
+    });
+  });
+  it("refuses original bytes when executing settlement loses to a competing completion", async () => {
+    const store = {
+      externalEffect: {
+        updateMany: vi.fn(async () => ({ count: 0 })),
+        findUnique: vi.fn(async () => ({ status: "completed", result: cached })),
+      },
+    };
+    const result = await settleUncertainEffect(store, "read-effect", "cloud_agent_result");
+    expect(result).toMatchObject({ error: expect.any(String) });
+    expect(result).not.toHaveProperty("original");
+    expect(await settleUncertainEffect(store, "other-effect", "destination.write")).toEqual(cached);
+  });
+  it("keeps ask/approved/denied decisions intact for the original reader", () => {
+    expect(
+      resolveDuplicateEffectGate({ status: "intended", result: cached }, "cloud_agent_result"),
+    ).toEqual({ action: "paused" });
+    expect(
+      resolveDuplicateEffectGate({ status: "approved", result: cached }, "cloud_agent_result"),
+    ).toEqual({ action: "execute" });
+    expect(
+      resolveDuplicateEffectGate({ status: "denied", result: cached }, "cloud_agent_result"),
+    ).toMatchObject({ action: "return", result: { error: expect.any(String) } });
+  });
+});

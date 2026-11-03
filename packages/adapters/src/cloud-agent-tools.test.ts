@@ -11,7 +11,7 @@ describe("cloud agent tool boundary", () => {
         CLOUD_AGENT_TOOL_NAMES.has(tool.name),
       ),
     ).toBe(false);
-    expect(selectCloudAgentTools(builtinAgentTools, true)).toBe(builtinAgentTools);
+    expect(selectCloudAgentTools(builtinAgentTools, true, true)).toBe(builtinAgentTools);
   });
   it("classifies every mutation as consequential", () => {
     for (const name of ["cloud_agent_launch", "cloud_agent_reply", "cloud_agent_cancel"])

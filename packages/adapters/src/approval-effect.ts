@@ -375,12 +375,21 @@ export type ExternalEffectStore = {
   };
 };
 
+/** Originals require current reader authorization; effect state is not an ACL. */
+export const ORIGINAL_RESULT_REPLAY_ERROR = "Original result access must be checked again.";
+
 export function resolveDuplicateEffectGate(
   effect: { status: string; result?: unknown },
   toolName: string,
 ): DuplicateEffectGate {
   if (effect.status === "completed") {
-    return { action: "return", result: effect.result ?? { duplicate: true } };
+    return {
+      action: "return",
+      result:
+        toolName === "cloud_agent_result"
+          ? { error: ORIGINAL_RESULT_REPLAY_ERROR }
+          : (effect.result ?? { duplicate: true }),
+    };
   }
   if (effect.status === "denied") {
     return {
@@ -392,7 +401,13 @@ export function resolveDuplicateEffectGate(
     return { action: "uncertain", toolName };
   }
   if (effect.status === "uncertain") {
-    return { action: "return", result: effect.result ?? uncertainEffectResult(toolName) };
+    return {
+      action: "return",
+      result:
+        toolName === "cloud_agent_result"
+          ? { error: ORIGINAL_RESULT_REPLAY_ERROR }
+          : (effect.result ?? uncertainEffectResult(toolName)),
+    };
   }
   if (effect.status === "approved") {
     return { action: "execute" };

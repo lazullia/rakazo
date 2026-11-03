@@ -151,6 +151,9 @@ export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
   "UserActionAutoReviewPreference",
   "SecurityEvent",
   "AuditEvent",
+  "PiWorkState",
+  "PiStageBinding",
+  "PiStageHandle",
 ]);
 
 /**

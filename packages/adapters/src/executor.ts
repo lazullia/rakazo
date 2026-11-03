@@ -111,6 +111,7 @@ import {
 import { modelAcceptsImageInput } from "./model-vision.js";
 import { usesNativeShell } from "./native-shell.js";
 import { paymentWalletConnected } from "./payment-wallets.js";
+import { PiCloudAgentProvider } from "./pi-cloud-agent.js";
 import { isRetiredModelCredentialError } from "./pi-oauth.js";
 import { loadPurchaseRedactions } from "./purchase-service.js";
 import { loadReplyContext, messageToAgentHistoryText } from "./reply-context.js";
@@ -1121,6 +1122,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             mediaImagesEnabled: Boolean(deps.artifacts && mediaGeneration?.capabilities.images),
             mediaVideoEnabled: Boolean(deps.artifacts && mediaGeneration?.capabilities.video),
             cloudAgentEnabled: cloudAgentsEnabled(cloudAgent, run.spaceId),
+            cloudAgentOriginalResults: cloudAgent?.provider instanceof PiCloudAgentProvider,
             paymentWalletEnabled,
             messagingChannelRun,
             voiceCall,

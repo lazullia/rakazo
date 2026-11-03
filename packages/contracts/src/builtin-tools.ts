@@ -51,6 +51,7 @@ export const BUILTIN_TOOL_NAMES = [
   "web_fetch",
   "cloud_agent_launch",
   "cloud_agent_status",
+  "cloud_agent_result",
   "cloud_agent_reply",
   "cloud_agent_cancel",
   "request_purchase",

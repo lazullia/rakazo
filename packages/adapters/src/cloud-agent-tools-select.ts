@@ -3,6 +3,7 @@ import type { ConnectorTool } from "@rakazo/adapter-kit";
 export const CLOUD_AGENT_TOOL_NAMES = new Set([
   "cloud_agent_launch",
   "cloud_agent_status",
+  "cloud_agent_result",
   "cloud_agent_reply",
   "cloud_agent_cancel",
 ]);
@@ -11,8 +12,10 @@ export const CLOUD_AGENT_TOOL_NAMES = new Set([
 export function selectCloudAgentTools(
   tools: ConnectorTool[],
   cloudAgentConfigured: boolean,
+  originalResultsEnabled = false,
 ): ConnectorTool[] {
-  return cloudAgentConfigured
+  if (!cloudAgentConfigured) return tools.filter((tool) => !CLOUD_AGENT_TOOL_NAMES.has(tool.name));
+  return originalResultsEnabled
     ? tools
-    : tools.filter((tool) => !CLOUD_AGENT_TOOL_NAMES.has(tool.name));
+    : tools.filter((tool) => tool.name !== "cloud_agent_result");
 }

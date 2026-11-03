@@ -81,7 +81,12 @@ export async function messageBot(
     intent?: BotMessageIntent;
     deliveryKey?: string;
   },
-  options?: { allowTerminalSource?: boolean; forceUnread?: boolean },
+  options?: {
+    allowTerminalSource?: boolean;
+    forceUnread?: boolean;
+    expectedThreadId?: string;
+    expectedName?: string;
+  },
 ) {
   const message = String(input.message ?? "").trim();
   if (!message) return { ok: false as const, error: "message is required" };
@@ -108,6 +113,10 @@ export async function messageBot(
   if (target.id === sender.id) return { ok: false as const, error: "a bot cannot message itself" };
   if (!target.thread)
     return { ok: false as const, error: `${target.name} has no chat to deliver to` };
+  if (options?.expectedThreadId && target.thread.id !== options.expectedThreadId)
+    return { ok: false as const, error: "fixed delivery thread changed" };
+  if (options?.expectedName && target.name !== options.expectedName)
+    return { ok: false as const, error: "fixed delivery name changed" };
   const returnsToSender =
     options?.allowTerminalSource === true &&
     (intent === "result" || intent === "status") &&
@@ -203,10 +212,26 @@ export async function messageBot(
             userId: run.userId,
             archivedAt: null,
           },
-          select: { id: true },
+          select: { id: true, ...(options?.expectedName ? { name: true } : {}) },
         });
+        if (options?.expectedName && stillAddressable?.name !== options.expectedName)
+          return { ok: false as const, error: "fixed delivery name changed" };
         if (!stillAddressable)
           return { ok: false as const, error: `${target.name} is no longer available` };
+        if (options?.expectedThreadId) {
+          // Source and target thread locks above serialize deletion/reassignment
+          // of the fixed thread. Never follow a newly resolved chat instead.
+          const fixed = await tx.thread.findFirst({
+            where: {
+              id: options.expectedThreadId,
+              botId: target.id,
+              spaceId: run.spaceId,
+              userId: run.userId,
+            },
+            select: { id: true },
+          });
+          if (!fixed) return { ok: false as const, error: "fixed delivery thread changed" };
+        }
 
         // Echo into the sender's chat in the same transaction so a failed notify
         // cannot leave one side delivered and the other blank.

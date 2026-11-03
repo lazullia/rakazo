@@ -35,6 +35,7 @@ export const cloudAgentLaunchSchema = cloudAgentPromptSchema.extend({
   openPr: z.boolean().optional(),
 });
 const idSchema = z.object({ id: z.string().trim().min(1) }).strict();
+export const cloudAgentResultSchema = idSchema;
 export const cloudAgentReplySchema = cloudAgentPromptSchema.extend({
   id: z.string().trim().min(1),
 });

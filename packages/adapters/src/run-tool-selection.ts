@@ -65,6 +65,7 @@ export function selectBuiltinToolsForRun(options: {
   /** The configured provider can forget individual facts. */
   semanticMemoryForgets?: boolean;
   cloudAgentEnabled?: boolean;
+  cloudAgentOriginalResults?: boolean;
   /** The run's user connected a payment wallet. */
   paymentWalletEnabled?: boolean;
   mediaImagesEnabled?: boolean;
@@ -100,6 +101,7 @@ export function selectBuiltinToolsForRun(options: {
       Boolean(options.semanticMemoryForgets),
     ),
     Boolean(options.cloudAgentEnabled),
+    Boolean(options.cloudAgentOriginalResults),
   ).filter(
     (tool) =>
       !disabled.has(tool.name) &&

@@ -2236,3 +2236,48 @@ model CapabilityInstallSpace {
   @@index([spaceId, userId])
   @@map("capability_install_spaces")
 }
+
+// Isolated Pi candidate. These records outlive chat/run deletion to prevent replay.
+model PiWorkState {
+  id        String @id
+  ownerId   String
+  spaceId   String
+  workId    String
+  stages    Json   @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+  bindings  PiStageBinding[]
+  handles   PiStageHandle[]
+
+  @@unique([ownerId, spaceId, workId], map: "pi_work_states_scope_work_key")
+  @@unique([id, ownerId, spaceId], map: "pi_work_states_id_scope_key")
+  @@map("pi_work_states")
+}
+
+model PiStageBinding {
+  agentId     String @id
+  workStateId String
+  ownerId     String
+  spaceId     String
+  stage       String
+  stageHandle PiStageHandle @relation(fields: [workStateId, stage], references: [workStateId, stage], onDelete: Restrict, onUpdate: NoAction)
+  workState   PiWorkState @relation(fields: [workStateId, ownerId, spaceId], references: [id, ownerId, spaceId], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([workStateId])
+  @@map("pi_stage_bindings")
+}
+
+model PiStageHandle {
+  workStateId    String
+  ownerId        String
+  spaceId        String
+  stage          String
+  runnerNamespace String
+  handle         String
+  workState      PiWorkState @relation(fields: [workStateId, ownerId, spaceId], references: [id, ownerId, spaceId], onDelete: Restrict, onUpdate: NoAction)
+  bindings       PiStageBinding[]
+
+  @@id([workStateId, stage])
+  @@unique([runnerNamespace, handle], map: "pi_stage_handles_runner_handle_key")
+  @@map("pi_stage_handles")
+}

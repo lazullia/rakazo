@@ -8,6 +8,9 @@ import type { CloudAgentConnection } from "./cloud-agent-factory.js";
 import { cloudAgentsEnabled } from "./cloud-agent-factory.js";
 import { cloudAgentLaunchSchema, cloudAgentReplySchema } from "./cloud-agent-tools.js";
 import type { ExecutorDeps } from "./executor-deps.js";
+import { PiCloudAgentProvider } from "./pi-cloud-agent.js";
+import { currentPiRun, readPiCloudAgentResult } from "./pi-cloud-agent-result.js";
+import type { PiNativeAdmission } from "./pi-native-admission.js";
 import { runLeaseFor } from "./run-messages.js";
 
 export interface CloudAgentDeps {
@@ -16,6 +19,7 @@ export interface CloudAgentDeps {
   events: Pick<ThreadEvents, "notify">;
   cloudAgent: CloudAgentConnection | null | undefined;
   runLease?: ExecutorDeps["runLease"];
+  piAdmission?: PiNativeAdmission;
 }
 
 export function cloudAgentBlock(agent: CloudAgent) {
@@ -34,23 +38,51 @@ export async function executeCloudAgentTool(
   if (!connection || !cloudAgentsEnabled(connection, context.spaceId)) {
     return { error: "Cloud agents are not configured for this space." };
   }
+  if (name === "cloud_agent_result") {
+    if (!(connection.provider instanceof PiCloudAgentProvider))
+      return { error: "Original result is unavailable for this provider." };
+    return readPiCloudAgentResult(deps, connection.provider, context, run, args);
+  }
   let agent: CloudAgent;
   if (name === "cloud_agent_launch") {
     const request = cloudAgentLaunchSchema.parse(args);
+    const pi =
+      connection.provider instanceof PiCloudAgentProvider ? connection.provider : undefined;
+    let admission: Awaited<ReturnType<PiNativeAdmission["prepare"]>> | undefined;
+    if (pi) {
+      try {
+        if (!deps.piAdmission || !(await currentPiRun(deps, context, run, name)))
+          return { error: "Pi work is not authorized for this run." };
+        admission = await deps.piAdmission.prepare(context, run, request);
+        await pi.checkNativeThread(admission.id, context, run.threadId);
+      } catch {
+        return { error: "Pi work is not authorized for this run." };
+      }
+    }
+    const operationKey = admission ? `pi-stage:${admission.id}` : context.operationId;
     const result = await deps.prisma.$transaction(async (tx) => {
       // Serialize with clearThread before creating either the intent or its card.
       await tx.thread.update({
         where: { id: run.threadId, userId: context.userId, spaceId: context.spaceId },
         data: { unread: false },
       });
+      if (admission) {
+        await deps.piAdmission!.recheck(context, run, admission);
+        if (!(await currentPiRun(deps, context, run, name)))
+          throw new Error("Pi work is not authorized for this run.");
+      }
       const existing = await tx.cloudAgent.findUnique({
-        where: { operationKey: context.operationId },
+        where: { operationKey },
       });
       if (existing) {
         if (
           existing.spaceId !== context.spaceId ||
           existing.userId !== context.userId ||
-          existing.providerKey !== connection.key
+          existing.providerKey !== connection.key ||
+          (admission &&
+            (existing.id !== admission.id ||
+              existing.botId !== context.botId ||
+              existing.threadId !== run.threadId))
         ) {
           throw new Error("Cloud agent operation scope changed");
         }
@@ -58,7 +90,8 @@ export async function executeCloudAgentTool(
       }
       const created = await tx.cloudAgent.create({
         data: {
-          operationKey: context.operationId,
+          ...(admission ? { id: admission.id } : {}),
+          operationKey,
           providerKey: connection.key,
           spaceId: context.spaceId,
           userId: context.userId,
@@ -113,6 +146,9 @@ export async function executeCloudAgentTool(
     if (!owned) return { error: "Unknown cloud agent." };
     agent = owned;
     if (name === "cloud_agent_reply") {
+      if (!connection.provider.describe().capabilities.reply) {
+        return { error: "Cloud agent follow-ups are unavailable." };
+      }
       if (
         agent.status === "running" ||
         agent.followup ||

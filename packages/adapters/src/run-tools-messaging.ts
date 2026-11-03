@@ -7,6 +7,8 @@ import {
 import { messageBot } from "./bot-messages.js";
 import { endCallFromTool, requestUserCall } from "./call-request.js";
 import { handoffToGroupBot } from "./group-handoff.js";
+import { PiCloudAgentProvider } from "./pi-cloud-agent.js";
+import { returnFixedPiResult } from "./pi-fixed-return.js";
 import { publishMessage } from "./run-messages.js";
 import {
   canPublishDurableProgress,
@@ -111,6 +113,17 @@ export const messagingTools: ToolHandlers = {
   async message_bot(ctx, call) {
     const { deps, run, bot } = ctx;
     const { args, effectKey } = call;
+    if (deps.piAdmission && ctx.providers.cloudAgent?.provider instanceof PiCloudAgentProvider) {
+      const fixed = await returnFixedPiResult(
+        deps,
+        ctx.providers.cloudAgent.provider,
+        { ...ctx.context, botId: bot.id },
+        run,
+        { id: bot.id, name: bot.name },
+        args,
+      );
+      if (fixed !== undefined) return call.finish(fixed);
+    }
     const sent = await messageBot(
       deps,
       { ...run, sourceMessageId: run.sourceMessageId },

@@ -26,6 +26,7 @@ function deps(
     senderRunning?: boolean;
     alreadyDelivered?: unknown;
     targetArchived?: boolean;
+    fixedThreadExists?: boolean;
     requesterArchived?: boolean;
     /** Simulate a unique (threadId, clientNonce) race after both retries miss. */
     uniqueConflictOnCommit?: boolean;
@@ -60,7 +61,12 @@ function deps(
       update: vi.fn().mockResolvedValue({}),
     },
     event: { create: vi.fn().mockResolvedValue({ seq: 7 }) },
-    thread: { update: vi.fn().mockResolvedValue({}) },
+    thread: {
+      update: vi.fn().mockResolvedValue({}),
+      findFirst: vi
+        .fn()
+        .mockResolvedValue(options.fixedThreadExists === false ? null : { id: "thread-target" }),
+    },
   };
   let transactionAttempts = 0;
   const prisma = {
@@ -803,5 +809,92 @@ describe("automatic outcome return", () => {
       },
       data: { botOutcomeReturnedAt: expect.any(Date) },
     });
+  });
+});
+
+describe("fixed-thread delivery", () => {
+  it("does not follow a different current thread", async () => {
+    const fixture = deps();
+    const result = await messageBot(
+      fixture.deps,
+      run,
+      sender,
+      { bot_id: "bot-target", message: "Result", intent: "result" },
+      { expectedThreadId: "previous-thread" },
+    );
+    expect(result.ok).toBe(false);
+    expect(fixture.tx.message.create).not.toHaveBeenCalled();
+    expect(fixture.enqueue).not.toHaveBeenCalled();
+  });
+  it("rechecks the fixed thread inside the send transaction", async () => {
+    const fixture = deps({ fixedThreadExists: false });
+    const result = await messageBot(
+      fixture.deps,
+      run,
+      sender,
+      { bot_id: "bot-target", message: "Result", intent: "result" },
+      { expectedThreadId: "thread-target" },
+    );
+    expect(result.ok).toBe(false);
+    expect(fixture.tx.thread.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "thread-target",
+          botId: "bot-target",
+          spaceId: run.spaceId,
+          userId: run.userId,
+        },
+      }),
+    );
+    expect(fixture.tx.message.create).not.toHaveBeenCalled();
+    expect(fixture.tx.task.create).not.toHaveBeenCalled();
+    expect(fixture.tx.run.create).not.toHaveBeenCalled();
+  });
+  it("delivers a result and wakes only the matching fixed thread", async () => {
+    const fixture = deps();
+    const result = await messageBot(
+      fixture.deps,
+      run,
+      sender,
+      {
+        bot_id: "bot-target",
+        message: "Result reference",
+        intent: "result",
+        deliveryKey: "work:review:result:1",
+      },
+      { expectedThreadId: "thread-target" },
+    );
+    expect(result.ok).toBe(true);
+    expect(fixture.tx.run.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          botId: "bot-target",
+          threadId: "thread-target",
+          trigger: "bot_message",
+        }),
+      }),
+    );
+  });
+});
+
+describe("fixed delivery recipient name", () => {
+  it("refuses a recipient renamed between initial resolution and the transaction", async () => {
+    const f = deps();
+    f.tx.bot.findFirst.mockResolvedValue({ id: "bot-target", name: "Renamed" });
+    const result = await messageBot(
+      f.deps,
+      run,
+      sender,
+      {
+        bot_id: "bot-target",
+        confirm_name: "Analyst",
+        message: "Approved reference",
+        intent: "result",
+      },
+      { expectedName: "Analyst" },
+    );
+    expect(result).toMatchObject({ ok: false, error: "fixed delivery name changed" });
+    expect(f.tx.task.create).not.toHaveBeenCalled();
+    expect(f.tx.run.create).not.toHaveBeenCalled();
   });
 });

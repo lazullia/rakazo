@@ -806,6 +806,17 @@ export const builtinAgentTools: ConnectorTool[] = [
     readOnly: true,
   },
   {
+    name: "cloud_agent_result",
+    description: "Read the saved original for an authorized cloud agent task in this chat.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Cloud agent id." } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
     name: "cloud_agent_reply",
     description: "Send a follow-up prompt to an existing cloud coding agent.",
     inputSchema: {

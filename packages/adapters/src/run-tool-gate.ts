@@ -485,6 +485,23 @@ export async function gateToolCall(
   if (applied?.duplicate) {
     const gate = resolveDuplicateEffectGate(applied.effect, name);
     if (gate.action === "return") {
+      if (name === "cloud_agent_result" && applied.effect.status === "completed") {
+        // The normal gate settled this exact effect; never replay its cached bytes.
+        // Membership, current grant and fixed recipient must be checked again.
+        return {
+          call: createToolCall(ctx, {
+            name,
+            args,
+            executionId,
+            observer,
+            connectorCall,
+            effectKey,
+            applied: undefined,
+            nextApprovedTool,
+            bypassApproval: false,
+          }),
+        };
+      }
       if (name === "request_secret") {
         const replacementSecret = await deps.prisma.secret.findFirst({
           where: {
@@ -621,6 +638,8 @@ function createToolCall(
       });
       if (current) {
         const retryGate = resolveDuplicateEffectGate(current, name);
+        // The shared resolver refuses cached original bytes, including claim
+        // races. Only the normal completed path can invoke a fresh reader.
         if (retryGate.action === "return") return retryGate.result;
         if (retryGate.action === "uncertain") {
           return settleToolUncertainty(ctx, call, applied!.effect.id, name);

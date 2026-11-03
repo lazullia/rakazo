@@ -19,6 +19,8 @@ import type { CloudAgentDeps } from "./cloud-agent-service.js";
 import { cloudAgentBlock, enqueueCloudAgent } from "./cloud-agent-service.js";
 import { cloudAgentLaunchSchema, cloudAgentPromptSchema } from "./cloud-agent-tools.js";
 
+import { PiCloudAgentProvider } from "./pi-cloud-agent.js";
+
 const FOLLOWUP_SETTLE_MS = 5 * 60_000;
 
 /** Reconcile one persisted intent. A fenced lease serializes remote mutations. */
@@ -67,6 +69,42 @@ export async function pollCloudAgent(
       }),
     ]);
     const abandoned = !card || !member || !bot;
+    if (provider instanceof PiCloudAgentProvider) {
+      // Pi dispatch ambiguity is observation-only. Do not inherit create replay,
+      // follow-up resends, or not_found => cancelled from another provider.
+      try {
+        await provider.checkNativeThread(agent.id, context, agent.threadId);
+        const consentUnavailable = deps.piAdmission
+          ? !(await deps.piAdmission.currentStage(agent.id))
+          : true;
+        const snapshot =
+          abandoned || agent.cancelRequested || consentUnavailable
+            ? await provider.cancel(agent.id, context)
+            : !agent.remoteId && !agent.launchDispatched
+              ? await provider.launch(
+                  {
+                    ...cloudAgentLaunchSchema.parse(agent.launchRequest),
+                    idempotencyKey: agent.id,
+                  },
+                  context,
+                )
+              : await provider.reconcile(agent.id, context, false);
+        await finishPoll(
+          deps,
+          agent,
+          {
+            ...snapshotData(snapshot),
+            remoteId: snapshot.id,
+            launchRequest: {},
+          },
+          abandoned,
+        );
+      } catch (error) {
+        if (!(error instanceof CloudAgentRequestRejected)) throw error;
+        await finishPoll(deps, agent, { status: "failed", launchRequest: {} }, abandoned);
+      }
+      return;
+    }
     if ((abandoned || agent.cancelRequested) && !agent.remoteId && !agent.launchDispatched) {
       await finishPoll(
         deps,
@@ -348,7 +386,11 @@ async function finishPoll(
       }
       if (terminal && saved.wakeGeneration < saved.generation) {
         // Provider text is untrusted. Wake with local identity and status only.
-        const summary = `Cloud agent ${agent.id} is ${status}. Use cloud_agent_status to inspect its result.`;
+        const inspection =
+          deps.cloudAgent?.provider instanceof PiCloudAgentProvider && status === "finished"
+            ? "cloud_agent_result"
+            : "cloud_agent_status";
+        const summary = `Cloud agent ${agent.id} is ${status}. Use ${inspection} to inspect its result.`;
         const task = await tx.task.create({
           data: {
             spaceId: agent.spaceId,

@@ -14,12 +14,16 @@ import { createPendingSteeringRun, sendUserMessage } from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DENIED_ACTION_ERROR, isApprovalPausedResult } from "./approval-effect.js";
 import { MAX_SHARED_MEMORY_CHARS } from "./builtin-tools.js";
+import type { CloudAgentConnection } from "./cloud-agent-factory.js";
 import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
 import { FakeWebProvider } from "./fake-web.js";
 import type * as FleetToolsModule from "./fleet-tools.js";
 import type { HostComputerRequest } from "./host-computer-protocol.js";
 import { catalogEntries, resolveCatalogCall } from "./lazy-tool-catalog.js";
+import { PiCloudAgentProvider } from "./pi-cloud-agent.js";
+import { binding, FakePiRunner, FakeStageStore } from "./pi-cloud-agent.test-fixtures.js";
+import type { PiNativeAdmission } from "./pi-native-admission.js";
 import type { UserDeviceGateway } from "./user-device-protocol.js";
 
 vi.mock("./computer-lifecycle.js", async (importOriginal) => ({
@@ -96,7 +100,11 @@ function fixture({
   userDevices,
   botUserId = "user-1",
   batch,
+  cloudAgent,
+  piAdmission,
 }: {
+  cloudAgent?: CloudAgentConnection;
+  piAdmission?: PiNativeAdmission;
   /** The tool runs the actions its arguments name; see ConnectorTool.batch. */
   batch?: ConnectorTool["batch"];
   userDevices?: UserDeviceGateway;
@@ -474,6 +482,8 @@ function fixture({
   });
   const enqueue = vi.fn(async (_job: unknown) => undefined);
   const executor = createRunExecutor({
+    cloudAgent,
+    piAdmission,
     deploymentModelKey: "fixture-model-key",
     prisma: transactionalPrisma,
     runtime: { describe: () => ({ capabilities: { scripted: false } }), run: runtimeRun },
@@ -3128,5 +3138,234 @@ describe("user computer screen control", () => {
     expect(f.pauseRunForInput).not.toHaveBeenCalled();
     expect(f.results).toEqual([{ error: expect.stringMatching(/^actions\.0/) }]);
     expect(requests).toEqual([]);
+  });
+});
+
+async function originalReaderFixture(
+  rules: ActionApprovalRule[] = [],
+  piAdmission?: PiNativeAdmission,
+) {
+  const records = new FakeStageStore();
+  const record = binding({
+    ownerId: "user-1",
+    spaceId: "space-1",
+    botId: "bot-1",
+    threadId: "thread-1",
+  });
+  records.bind("item-1", record);
+  const runner = new FakePiRunner(records);
+  const provider = new PiCloudAgentProvider(records, runner, () => 1);
+  const source = {
+    operationId: "setup",
+    traceId: "setup",
+    signal: new AbortController().signal,
+    userId: "user-1",
+    spaceId: "space-1",
+    botId: "bot-1",
+  };
+  await provider.launch({ idempotencyKey: "item-1", prompt: record.input }, source);
+  runner.states.set(record.handle, { kind: "completed", text: "Generalized original" });
+  await provider.get("item-1", source);
+  const f = fixture({
+    name: "cloud_agent_result",
+    builtin: true,
+    trigger: "cloud_agent",
+    rules,
+    cloudAgent: { key: "fake-pi", spaceId: "space-1", provider },
+    piAdmission:
+      piAdmission ?? ({ authorizeResult: async () => true } as unknown as PiNativeAdmission),
+  });
+  let member = true;
+  Object.assign(f.prisma, {
+    spaceMember: { findUnique: vi.fn(async () => (member ? { id: "membership" } : null)) },
+  });
+  Object.assign(f.prisma.thread, { findFirst: vi.fn(async () => ({ id: "thread-1" })) });
+  Object.assign(f.prisma.bot, {
+    findFirst: vi.fn(async (query: { select?: { disabledBuiltinTools?: boolean } }) =>
+      query.select?.disabledBuiltinTools ? { id: "bot-1", disabledBuiltinTools: [] } : null,
+    ),
+  });
+  Object.assign(f.prisma.run, {
+    findFirst: vi.fn(async (query: { where?: { id?: string; status?: string } }) =>
+      query.where?.id === "run-1" && query.where.status === "running" ? { id: "run-1" } : null,
+    ),
+  });
+  return {
+    ...f,
+    provider,
+    reader: vi.spyOn(provider, "readForRun"),
+    revokeMember: () => {
+      member = false;
+    },
+    revokeGrant: () =>
+      records.change("item-1", (current) => {
+        current.approvalValid = false;
+      }),
+  };
+}
+
+describe("original-result reader through the actual continuation executor and normal gate", () => {
+  it("returns the original inside a cloud_agent continuation without a new ask card", async () => {
+    const f = await originalReaderFixture([
+      { effect: "always_allow", matchKind: "tool", matchValue: "cloud_agent_result" },
+    ]);
+    await f.run();
+    expect(f.offeredTools()).toContain("cloud_agent_result");
+    expect(f.results.at(-1)).toMatchObject({
+      executionState: "completed",
+      original: { text: "Generalized original" },
+      accepted: false,
+    });
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.reader).toHaveBeenCalledWith(
+      "item-1",
+      expect.objectContaining({ botId: "bot-1", threadId: "thread-1" }),
+    );
+  });
+  it("preserves an explicit require-approval rule before reading any bytes", async () => {
+    const f = await originalReaderFixture([
+      { effect: "require_approval", matchKind: "tool", matchValue: "cloud_agent_result" },
+    ]);
+    await f.run();
+    expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
+    expect(f.reader).not.toHaveBeenCalled();
+  });
+  it("preserves a deny rule before reading any bytes", async () => {
+    const f = await originalReaderFixture([
+      { effect: "deny", matchKind: "tool", matchValue: "cloud_agent_result" },
+    ]);
+    await f.run();
+    expect(f.results.at(-1)).toMatchObject({ error: expect.stringContaining("blocked") });
+    expect(f.reader).not.toHaveBeenCalled();
+  });
+  it("uses the existing exact-effect approval resume without adding another card", async () => {
+    const f = await originalReaderFixture([
+      { effect: "require_approval", matchKind: "tool", matchValue: "cloud_agent_result" },
+    ]);
+    await f.run();
+    expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
+    expect(f.effects).toHaveLength(1);
+    f.effects[0]!.status = "approved";
+    await f.run();
+    expect(f.results.at(-1)).toMatchObject({
+      original: { text: "Generalized original" },
+      accepted: false,
+    });
+    expect(f.pauseRunForInput).toHaveBeenCalledTimes(1);
+  });
+  it("rechecks the current finite-work grant on a completed effect replay", async () => {
+    const f = await originalReaderFixture();
+    await f.run();
+    await f.revokeGrant();
+    await f.run();
+    expect(f.results.at(-1)).toEqual({ error: "Original result is unavailable for this run." });
+    expect(f.reader).toHaveBeenCalledTimes(2);
+  });
+  it("rechecks membership instead of replaying cached original bytes", async () => {
+    const f = await originalReaderFixture();
+    await f.run();
+    expect(f.results.at(-1)).toMatchObject({ original: { text: "Generalized original" } });
+    f.revokeMember();
+    await f.run();
+    expect(f.results.at(-1)).toEqual({ error: "Original result is unavailable for this run." });
+    expect(f.reader).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("original-result effect race reproductions", () => {
+  for (const path of ["approved-claim", "intended-claim", "executing-settlement"] as const) {
+    for (const revoked of ["member", "grant"] as const) {
+      it(`${path} never returns a competing completion after ${revoked} revocation`, async () => {
+        const f = await originalReaderFixture();
+        await f.run();
+        const effect = f.effects[0]!;
+        const cached = effect.result;
+        expect(cached).toMatchObject({ original: { text: "Generalized original" } });
+        effect.status =
+          path === "approved-claim"
+            ? "approved"
+            : path === "intended-claim"
+              ? "intended"
+              : "executing";
+        if (revoked === "member") f.revokeMember();
+        else await f.revokeGrant();
+        const update = f.prisma.externalEffect.updateMany.getMockImplementation()!;
+        let competed = false;
+        f.prisma.externalEffect.updateMany.mockImplementation(async (query) => {
+          const atClaim =
+            (query.where.status === "approved" || query.where.status === "intended") &&
+            query.data.status === "executing";
+          const atSettlement =
+            query.where.status === "executing" && query.data.status === "uncertain";
+          if (!competed && (path === "executing-settlement" ? atSettlement : atClaim)) {
+            competed = true;
+            effect.status = "completed";
+            effect.result = cached;
+            return { count: 0 };
+          }
+          return update(query);
+        });
+        await f.run();
+        expect(competed).toBe(true);
+        expect(f.results.at(-1)).not.toHaveProperty("original");
+        expect(f.results.at(-1)).toMatchObject({ error: expect.any(String) });
+        // This policy may refuse a conflict instead of re-reading. Neither choice
+        // may emit the previous response after authorization was revoked.
+        expect(f.reader).toHaveBeenCalledTimes(1);
+        expect(f.pauseRunForInput).not.toHaveBeenCalled();
+      });
+    }
+  }
+});
+
+describe("finite-work admission never replaces the existing native launch gate", () => {
+  it.each(["require_approval", "deny", "always_allow"] as const)(
+    "preserves %s before server admission",
+    async (effect) => {
+      const prepare = vi.fn(async () => {
+        throw new Error("No finite owner receipt");
+      });
+      const admission = { prepare } as unknown as PiNativeAdmission;
+      const f = await originalReaderFixture(
+        [{ effect, matchKind: "tool", matchValue: "cloud_agent_launch" }],
+        admission,
+      );
+      f.setCalls([
+        {
+          name: "cloud_agent_launch",
+          args: { prompt: "Generalized task" },
+          executionId: "launch-1",
+        },
+      ]);
+      await f.run();
+      if (effect === "require_approval") {
+        expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
+        expect(prepare).not.toHaveBeenCalled();
+      } else if (effect === "deny") {
+        expect(f.results.at(-1)).toHaveProperty("error");
+        expect(prepare).not.toHaveBeenCalled();
+      } else {
+        // The normal rule permits reaching admission without a new card. It does
+        // not substitute for the missing finite owner receipt or launch a Pi.
+        expect(f.pauseRunForInput).not.toHaveBeenCalled();
+        expect(prepare).toHaveBeenCalledOnce();
+        expect(f.results.at(-1)).toHaveProperty("error", "Pi work is not authorized for this run.");
+      }
+    },
+  );
+});
+
+describe("current receipt on normal completed original-result replay", () => {
+  it("refuses cached bytes after the authoritative receipt check stops allowing the reader", async () => {
+    let authorized = true;
+    const authorizeResult = vi.fn(async () => authorized);
+    const f = await originalReaderFixture([], { authorizeResult } as unknown as PiNativeAdmission);
+    await f.run();
+    expect(f.results.at(-1)).toHaveProperty("original");
+    authorized = false;
+    await f.run();
+    expect(f.results.at(-1)).toEqual({ error: "Original result is unavailable for this run." });
+    expect(f.reader).toHaveBeenCalledOnce();
+    expect(authorizeResult).toHaveBeenCalledTimes(3);
   });
 });
